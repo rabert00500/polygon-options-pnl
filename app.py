@@ -2,8 +2,10 @@
 # - Desktop: inputs in sidebar
 # - Mobile: inputs in main-page expander (no sidebar needed)
 # - Secrets-safe API key (works on Cloud + local)
-# - KPIs: Entry→Exit, Peak after entry, Before-Peak Low (percent colors)
-# - Table: highlight Peak row (green) + Lowest-before-peak row (red)
+# - Remembers last inputs via URL query params (per device/session)
+# - KPIs: Entry→Exit, Peak after entry, Before-Peak Low
+# - Adds Underlying % move at option peak
+# - Chart: Entry/Peak/Exit markers use distinct colors
 
 import io
 import requests
@@ -58,6 +60,136 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# =========================
+# QUERY PARAMS (Remember last inputs)
+# =========================
+def qp_get_all() -> dict:
+    # Works across Streamlit versions
+    try:
+        # Streamlit newer API
+        return dict(st.query_params)
+    except Exception:
+        try:
+            return st.experimental_get_query_params()
+        except Exception:
+            return {}
+
+def qp_set(**kwargs):
+    # Store only simple strings
+    clean = {k: str(v) for k, v in kwargs.items() if v is not None}
+    try:
+        st.query_params.clear()
+        for k, v in clean.items():
+            st.query_params[k] = v
+    except Exception:
+        st.experimental_set_query_params(**clean)
+
+def parse_date(s: str, fallback: date) -> date:
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except Exception:
+        return fallback
+
+def parse_time(s: str, fallback: dtime) -> dtime:
+    try:
+        return datetime.strptime(s, "%H:%M").time()
+    except Exception:
+        return fallback
+
+def parse_bool(s: str, fallback: bool) -> bool:
+    if s is None:
+        return fallback
+    return str(s).lower() in ("1", "true", "yes", "y", "t", "on")
+
+def parse_int(s: str, fallback: int) -> int:
+    try:
+        return int(s)
+    except Exception:
+        return fallback
+
+def parse_float(s: str, fallback: float) -> float:
+    try:
+        return float(s)
+    except Exception:
+        return fallback
+
+def init_session_defaults_from_qp():
+    qp = qp_get_all()
+
+    # Defaults (match your typical usage)
+    defaults = {
+        "ticker": "QQQ",
+        "opt_type": "C",
+        "strike": 400.0,
+        "expiry": date(2025, 3, 15),
+        "timespan": "minute",
+        "entry_date": date(2025, 3, 12),
+        "entry_time": dtime(6, 30),
+        "exit_date": date(2025, 3, 12),
+        "exit_time": dtime(13, 0),
+        "contracts": 1,
+        "underlying_adjusted": True,
+        "use_rth_close_for_daily": True,
+    }
+
+    # Only set if not already present (don’t override user edits mid-session)
+    if "ticker" not in st.session_state:
+        st.session_state.ticker = str(qp.get("ticker", defaults["ticker"])).upper()
+
+    if "opt_type" not in st.session_state:
+        ot = str(qp.get("opt_type", defaults["opt_type"])).upper()
+        st.session_state.opt_type = ot if ot in ("C", "P") else defaults["opt_type"]
+
+    if "strike" not in st.session_state:
+        st.session_state.strike = parse_float(qp.get("strike"), defaults["strike"])
+
+    if "expiry" not in st.session_state:
+        st.session_state.expiry = parse_date(qp.get("expiry"), defaults["expiry"])
+
+    if "timespan" not in st.session_state:
+        ts = str(qp.get("timespan", defaults["timespan"]))
+        st.session_state.timespan = ts if ts in ("minute", "day") else defaults["timespan"]
+
+    if "entry_date" not in st.session_state:
+        st.session_state.entry_date = parse_date(qp.get("entry_date"), defaults["entry_date"])
+
+    if "entry_time" not in st.session_state:
+        st.session_state.entry_time = parse_time(qp.get("entry_time"), defaults["entry_time"])
+
+    if "exit_date" not in st.session_state:
+        st.session_state.exit_date = parse_date(qp.get("exit_date"), defaults["exit_date"])
+
+    if "exit_time" not in st.session_state:
+        st.session_state.exit_time = parse_time(qp.get("exit_time"), defaults["exit_time"])
+
+    if "contracts" not in st.session_state:
+        st.session_state.contracts = parse_int(qp.get("contracts"), defaults["contracts"])
+
+    if "underlying_adjusted" not in st.session_state:
+        st.session_state.underlying_adjusted = parse_bool(qp.get("underlying_adjusted"), defaults["underlying_adjusted"])
+
+    if "use_rth_close_for_daily" not in st.session_state:
+        st.session_state.use_rth_close_for_daily = parse_bool(qp.get("use_rth_close_for_daily"), defaults["use_rth_close_for_daily"])
+
+def save_inputs_to_qp():
+    # Save *current* values so next open remembers them
+    qp_set(
+        ticker=st.session_state.ticker,
+        opt_type=st.session_state.opt_type,
+        strike=st.session_state.strike,
+        expiry=st.session_state.expiry.strftime("%Y-%m-%d"),
+        timespan=st.session_state.timespan,
+        entry_date=st.session_state.entry_date.strftime("%Y-%m-%d"),
+        entry_time=st.session_state.entry_time.strftime("%H:%M"),
+        exit_date=st.session_state.exit_date.strftime("%Y-%m-%d"),
+        exit_time=st.session_state.exit_time.strftime("%H:%M"),
+        contracts=st.session_state.contracts,
+        underlying_adjusted=str(st.session_state.underlying_adjusted).lower(),
+        use_rth_close_for_daily=str(st.session_state.use_rth_close_for_daily).lower(),
+    )
+
+init_session_defaults_from_qp()
 
 # =========================
 # HELPERS
@@ -240,6 +372,7 @@ except Exception:
 if APP_PASSWORD:
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
+
     if not st.session_state.authenticated:
         pwd = st.text_input("App Password", type="password")
         if pwd == APP_PASSWORD:
@@ -249,16 +382,11 @@ if APP_PASSWORD:
             st.info("Enter password to continue.")
             st.stop()
 
+
 # =========================
 # TITLE
 # =========================
 st.title("📈 Polygon Options P&L — Option + Underlying (Adjusted)")
-
-# Detect "mobile" by screen width (approx). Streamlit doesn't provide exact device info,
-# so we use a simple heuristic: show main-page Settings by default on all devices,
-# but keep sidebar for desktop convenience too.
-# (Users on desktop can ignore the expander and use sidebar.)
-show_sidebar = True
 
 # =========================
 # API KEY (secrets-safe, local-safe)
@@ -269,37 +397,38 @@ except Exception:
     secret_key = ""
 
 # =========================
-# INPUTS
+# INPUTS (sidebar + main expander)
 # =========================
 def render_inputs(container):
     container.subheader("Contract")
-    ticker_ = container.text_input("Underlying Ticker", "QQQ").upper()
-    opt_type_ = container.radio("Call / Put", ["C", "P"], horizontal=True)
-    strike_ = container.number_input("Strike", value=400.0, step=0.5, min_value=0.0)
-    expiry_ = container.date_input("Expiration", value=date(2025, 3, 15))
+
+    ticker_ = container.text_input("Underlying Ticker", key="ticker").upper()
+    opt_type_ = container.radio("Call / Put", ["C", "P"], key="opt_type", horizontal=True)
+    strike_ = container.number_input("Strike", key="strike", step=0.5, min_value=0.0)
+    expiry_ = container.date_input("Expiration", key="expiry")
 
     container.subheader("Window")
-    timespan_ = container.radio("Timespan", ["minute", "day"], horizontal=True)
+    timespan_ = container.radio("Timespan", ["minute", "day"], key="timespan", horizontal=True)
 
-    entry_date_ = container.date_input("Entry Date", value=date(2025, 3, 12))
-    entry_time_ = container.time_input("Entry Time (LA)", value=dtime(6, 30))
+    entry_date_ = container.date_input("Entry Date", key="entry_date")
+    entry_time_ = container.time_input("Entry Time (LA)", key="entry_time")
 
-    exit_date_ = container.date_input("Exit Date", value=date(2025, 3, 12))
-    exit_time_ = container.time_input("Exit Time (LA)", value=dtime(13, 0))
+    exit_date_ = container.date_input("Exit Date", key="exit_date")
+    exit_time_ = container.time_input("Exit Time (LA)", key="exit_time")
 
-    contracts_ = container.number_input("Contracts", value=1, step=1, min_value=1)
+    contracts_ = container.number_input("Contracts", key="contracts", step=1, min_value=1)
 
     container.subheader("Data")
-    underlying_adjusted_ = container.checkbox("Underlying uses Adjusted prices", value=True)
+    underlying_adjusted_ = container.checkbox("Underlying uses Adjusted prices", key="underlying_adjusted")
     use_rth_close_for_daily_ = container.checkbox(
         "Day mode: Use RTH Close (13:00 LA) instead of Polygon Daily Close",
-        value=True
+        key="use_rth_close_for_daily",
     )
 
     # API key input only if no secret present
     api_key_ = secret_key.strip()
     if not api_key_:
-        api_key_ = container.text_input("Polygon API Key", type="password").strip()
+        api_key_ = container.text_input("Polygon API Key", type="password", key="manual_api_key").strip()
 
     run_ = container.button("Run", use_container_width=True)
     return (ticker_, opt_type_, strike_, expiry_,
@@ -309,18 +438,14 @@ def render_inputs(container):
 
 # Desktop convenience: sidebar inputs
 sidebar_vals = None
-if show_sidebar:
-    st.sidebar.header("🔧 Settings")
-    sidebar_vals = render_inputs(st.sidebar)
+st.sidebar.header("🔧 Settings")
+sidebar_vals = render_inputs(st.sidebar)
 
 # Mobile-first: main-page Settings expander (always available)
 with st.expander("⚙️ Settings", expanded=True):
     main_vals = render_inputs(st)
 
-# Choose which set of inputs to use:
-# - If user pressed Run in sidebar, use sidebar values.
-# - Else if user pressed Run in main settings, use main values.
-# - Else default to main values.
+# Use whichever Run was pressed most recently
 use_vals = main_vals
 if sidebar_vals is not None and sidebar_vals[-1]:
     use_vals = sidebar_vals
@@ -334,10 +459,13 @@ elif main_vals[-1]:
     API_KEY, run
 ) = use_vals
 
-# Stop until Run is pressed (either place)
+# Stop until Run is pressed
 if not run:
     st.info("Set your inputs above and tap **Run**.")
     st.stop()
+
+# Save inputs so next open remembers them
+save_inputs_to_qp()
 
 if not API_KEY:
     st.error("Please enter your Polygon API key.")
@@ -387,6 +515,7 @@ if timespan == "day" and use_rth_close_for_daily:
         except Exception as e:
             st.warning(f"Could not fetch minute bars for RTH close override; using Polygon daily close instead. ({e})")
             option_minute_raw = []
+
     if option_minute_raw:
         option_minute_df = clean_option_df(option_minute_raw, "minute")
         rth_by_date = compute_rth_close_series_from_minutes(option_minute_df, rth_cutoff_hhmm="13:00")
@@ -396,6 +525,13 @@ df = add_underlying_price(option_df, underlying_df)
 
 df, entry_price, exit_price, entry_to_exit_pct, peak_idx, peak_time, peak_price, entry_to_peak_pct, peak_col = add_pnl_and_extremes(df, contracts)
 min_before_peak_price, min_before_peak_pct, min_before_peak_time, min_before_peak_idx = lowest_low_before_peak(df, entry_price, peak_idx)
+
+# Underlying % move at option peak
+under_entry = df.iloc[0].get("Underlying Adj Close", pd.NA)
+under_peak = df.loc[peak_idx].get("Underlying Adj Close", pd.NA)
+under_peak_pct = None
+if pd.notna(under_entry) and pd.notna(under_peak) and float(under_entry) != 0:
+    under_peak_pct = (float(under_peak) - float(under_entry)) / float(under_entry) * 100
 
 # KPIs
 c1, c2, c3 = st.columns([1.5, 1.25, 1.25])
@@ -415,18 +551,24 @@ with c3:
         unsafe_allow_html=True,
     )
 
+extra_line = ""
+if under_peak_pct is not None:
+    cls = "pct-green" if under_peak_pct >= 0 else "pct-red"
+    extra_line = f'&nbsp;&nbsp;•&nbsp;&nbsp; Underlying move at option peak: <span class="{cls}"><b>{under_peak_pct:,.2f}%</b></span>'
+
 st.markdown(
     f"""
     <div class="kpi-note">
       Peak at: <code>{fmt_ts(peak_time, timespan)}</code>
       &nbsp;&nbsp;•&nbsp;&nbsp;
       Before-peak low at: <code>{fmt_ts(min_before_peak_time, timespan)}</code>
+      {extra_line}
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-# Table + Chart tabs (best for mobile)
+# Table + Chart tabs
 def highlight_rows(row):
     is_peak = row.name == peak_idx
     is_low = row.name == min_before_peak_idx
@@ -476,8 +618,16 @@ with tab_chart:
     st.subheader("📊 Chart")
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(df["DateTime"], df["Close"], label="Option Close", marker="o")
-    ax.scatter([peak_time], [peak_price], marker="D", label=f"Peak after entry ({peak_col})", zorder=3)
-    ax.scatter([min_before_peak_time], [min_before_peak_price], marker="D", label="Before-peak low", zorder=3)
+
+    # Make key points visible with distinct colors
+    entry_time = df.iloc[0]["DateTime"]
+    exit_time = df.iloc[-1]["DateTime"]
+
+    ax.scatter([entry_time], [entry_price], marker="o", s=90, color="deepskyblue", label="Entry", zorder=4)
+    ax.scatter([peak_time], [peak_price], marker="D", s=110, color="orange", label=f"Peak ({peak_col})", zorder=5)
+    ax.scatter([min_before_peak_time], [min_before_peak_price], marker="D", s=110, color="crimson", label="Before-peak low", zorder=5)
+    ax.scatter([exit_time], [exit_price], marker="s", s=90, color="violet", label="Exit", zorder=4)
+
     ax.set_ylabel("Option Price ($)")
     ax.grid(alpha=0.3)
     ax.legend()
