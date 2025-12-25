@@ -1,11 +1,13 @@
 # app.py — Polygon Options P&L (Mobile-first UI)
 # - Desktop: inputs in sidebar
-# - Mobile: inputs in main-page expander (no sidebar needed)
+# - Mobile: inputs in main-page expander (no sidebar needed) + sidebar auto-hidden
 # - Secrets-safe API key (works on Cloud + local)
-# - Remembers last inputs via URL query params (per device/session)
+# - Optional APP_PASSWORD gate (from secrets)
+# - Remembers last inputs via URL query params
 # - KPIs: Entry→Exit, Peak after entry, Before-Peak Low
 # - Adds Underlying % move at option peak
-# - Chart: Entry/Peak/Exit markers use distinct colors
+# - Table: highlight Peak row (green) + Lowest-before-peak row (red)
+# - Chart: Entry/Peak/Low/Exit markers use distinct colors
 
 import io
 import requests
@@ -20,7 +22,7 @@ LA_TZ = ZoneInfo("America/Los_Angeles")
 st.set_page_config(page_title="Polygon Options P&L", page_icon="📈", layout="wide")
 
 # -------------------------
-# MOBILE-FIRST CSS
+# MOBILE-FIRST CSS + HIDE SIDEBAR ON MOBILE
 # -------------------------
 st.markdown(
     """
@@ -51,10 +53,15 @@ st.markdown(
       /* Mobile */
       @media (max-width: 900px) {
         .block-container { padding-left: 0.75rem; padding-right: 0.75rem; }
+
         /* stack columns */
         div[data-testid="column"] { width: 100% !important; flex: 1 1 100% !important; }
         .kpi-value { font-size: 1.65rem; }
         .kpi-sub   { font-size: 0.95rem; }
+
+        /* hide sidebar */
+        section[data-testid="stSidebar"] { display: none !important; }
+        button[kind="header"] { display: none !important; } /* hides sidebar toggle in some themes */
       }
     </style>
     """,
@@ -65,9 +72,7 @@ st.markdown(
 # QUERY PARAMS (Remember last inputs)
 # =========================
 def qp_get_all() -> dict:
-    # Works across Streamlit versions
     try:
-        # Streamlit newer API
         return dict(st.query_params)
     except Exception:
         try:
@@ -76,7 +81,6 @@ def qp_get_all() -> dict:
             return {}
 
 def qp_set(**kwargs):
-    # Store only simple strings
     clean = {k: str(v) for k, v in kwargs.items() if v is not None}
     try:
         st.query_params.clear()
@@ -87,13 +91,13 @@ def qp_set(**kwargs):
 
 def parse_date(s: str, fallback: date) -> date:
     try:
-        return datetime.strptime(s, "%Y-%m-%d").date()
+        return datetime.strptime(str(s), "%Y-%m-%d").date()
     except Exception:
         return fallback
 
 def parse_time(s: str, fallback: dtime) -> dtime:
     try:
-        return datetime.strptime(s, "%H:%M").time()
+        return datetime.strptime(str(s), "%H:%M").time()
     except Exception:
         return fallback
 
@@ -116,8 +120,6 @@ def parse_float(s: str, fallback: float) -> float:
 
 def init_session_defaults_from_qp():
     qp = qp_get_all()
-
-    # Defaults (match your typical usage)
     defaults = {
         "ticker": "QQQ",
         "opt_type": "C",
@@ -133,7 +135,6 @@ def init_session_defaults_from_qp():
         "use_rth_close_for_daily": True,
     }
 
-    # Only set if not already present (don’t override user edits mid-session)
     if "ticker" not in st.session_state:
         st.session_state.ticker = str(qp.get("ticker", defaults["ticker"])).upper()
 
@@ -173,7 +174,6 @@ def init_session_defaults_from_qp():
         st.session_state.use_rth_close_for_daily = parse_bool(qp.get("use_rth_close_for_daily"), defaults["use_rth_close_for_daily"])
 
 def save_inputs_to_qp():
-    # Save *current* values so next open remembers them
     qp_set(
         ticker=st.session_state.ticker,
         opt_type=st.session_state.opt_type,
@@ -190,175 +190,6 @@ def save_inputs_to_qp():
     )
 
 init_session_defaults_from_qp()
-
-# =========================
-# HELPERS
-# =========================
-def build_option_symbol(ticker: str, expiry: str, strike: float, opt_type: str) -> str:
-    dt = datetime.strptime(expiry, "%Y-%m-%d")
-    return f"O:{ticker.upper()}{dt.strftime('%y%m%d')}{opt_type.upper()}{int(round(strike * 1000)):08d}"
-
-
-@st.cache_data(ttl=300)
-def fetch_bars(api_key: str, symbol: str, timespan: str, start: str, end: str, adjusted: bool | None = None):
-    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/{timespan}/{start}/{end}"
-    params = {"apiKey": api_key}
-    if adjusted is not None:
-        params["adjusted"] = "true" if adjusted else "false"
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
-    return r.json().get("results", [])
-
-
-def clean_option_df(raw_results, timespan: str) -> pd.DataFrame:
-    df = pd.DataFrame(raw_results)
-    if timespan == "day":
-        df["DateTime"] = pd.to_datetime(df["t"], unit="ms", utc=True).dt.date
-        df["DateTime"] = pd.to_datetime(df["DateTime"])  # naive midnight date
-    else:
-        df["DateTime"] = pd.to_datetime(df["t"], unit="ms", utc=True).dt.tz_convert(LA_TZ)
-
-    df = df.rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"})
-    keep = ["DateTime", "Open", "High", "Low", "Close", "Volume"]
-    df = df[[c for c in keep if c in df.columns]].sort_values("DateTime").reset_index(drop=True)
-    return df
-
-
-def clean_underlying_df(raw_results, timespan: str) -> pd.DataFrame:
-    df = pd.DataFrame(raw_results)
-    if timespan == "day":
-        df["DateTime"] = pd.to_datetime(df["t"], unit="ms", utc=True).dt.date
-        df["DateTime"] = pd.to_datetime(df["DateTime"])  # naive midnight date
-    else:
-        df["DateTime"] = pd.to_datetime(df["t"], unit="ms", utc=True).dt.tz_convert(LA_TZ)
-
-    df = df.rename(columns={"c": "Underlying Adj Close"})
-    df = df[["DateTime", "Underlying Adj Close"]].sort_values("DateTime").reset_index(drop=True)
-    return df
-
-
-def add_underlying_price(option_df: pd.DataFrame, underlying_df: pd.DataFrame) -> pd.DataFrame:
-    if option_df.empty:
-        return option_df
-    if underlying_df.empty:
-        out = option_df.copy()
-        out["Underlying Adj Close"] = pd.NA
-        return out
-
-    return pd.merge_asof(
-        option_df.sort_values("DateTime"),
-        underlying_df.sort_values("DateTime"),
-        on="DateTime",
-        direction="backward",
-    )
-
-
-def compute_rth_close_series_from_minutes(minute_df: pd.DataFrame, rth_cutoff_hhmm: str = "13:00") -> pd.DataFrame:
-    if minute_df.empty:
-        return pd.DataFrame(columns=["Date", "RTH Close"])
-
-    cutoff_time = pd.to_datetime(rth_cutoff_hhmm).time()
-    tmp = minute_df.copy()
-    if tmp["DateTime"].dt.tz is None:
-        tmp["DateTime"] = tmp["DateTime"].dt.tz_localize(LA_TZ)
-
-    tmp["LA_Date"] = tmp["DateTime"].dt.date
-    tmp["LA_Time"] = tmp["DateTime"].dt.time
-    tmp = tmp[tmp["LA_Time"] <= cutoff_time].sort_values("DateTime")
-
-    rth = tmp.groupby("LA_Date", as_index=False).tail(1)[["LA_Date", "Close"]]
-    rth = rth.rename(columns={"Close": "RTH Close"})
-    rth["Date"] = pd.to_datetime(rth["LA_Date"])
-    return rth[["Date", "RTH Close"]].sort_values("Date").reset_index(drop=True)
-
-
-def apply_rth_close_override_to_daily(df_daily: pd.DataFrame, rth_close_by_date: pd.DataFrame) -> pd.DataFrame:
-    if df_daily.empty:
-        return df_daily
-
-    out = df_daily.copy()
-    out = out.merge(rth_close_by_date, how="left", left_on="DateTime", right_on="Date")
-
-    if "Date" in out.columns:
-        out = out.drop(columns=["Date"])
-
-    out["Close (Polygon Daily)"] = out["Close"]
-    out["Close"] = out["RTH Close"].combine_first(out["Close"])
-    return out
-
-
-def add_pnl_and_extremes(df: pd.DataFrame, contracts: int):
-    if df.empty:
-        raise ValueError("No rows returned after filtering.")
-
-    entry_price = float(df.iloc[0]["Close"])
-    exit_price = float(df.iloc[-1]["Close"])
-
-    df["Profit%"] = (df["Close"] - entry_price) / entry_price * 100
-    df["PnL ($)"] = (df["Close"] - entry_price) * contracts * 100
-
-    peak_col = "High" if "High" in df.columns else "Close"
-    if len(df) >= 2:
-        peak_idx = df.iloc[1:][peak_col].idxmax()
-    else:
-        peak_idx = df.index[0]
-
-    peak_price = float(df.loc[peak_idx, peak_col])
-    peak_time = df.loc[peak_idx, "DateTime"]
-
-    entry_to_exit_pct = (exit_price - entry_price) / entry_price * 100
-    entry_to_peak_pct = (peak_price - entry_price) / entry_price * 100
-
-    return df, entry_price, exit_price, entry_to_exit_pct, peak_idx, peak_time, peak_price, entry_to_peak_pct, peak_col
-
-
-def lowest_low_before_peak(df: pd.DataFrame, entry_price: float, peak_idx: int):
-    low_col = "Low" if "Low" in df.columns else "Close"
-    if len(df) < 2:
-        return entry_price, 0.0, df.iloc[0]["DateTime"], int(df.index[0])
-
-    try:
-        peak_pos = df.index.get_loc(peak_idx)
-    except Exception:
-        peak_pos = len(df) - 1
-
-    peak_pos = max(peak_pos, 1)
-    window = df.iloc[1:peak_pos + 1].copy()
-    if window.empty:
-        return entry_price, 0.0, df.iloc[0]["DateTime"], int(df.index[0])
-
-    min_idx = window[low_col].idxmin()
-    min_price = float(df.loc[min_idx, low_col])
-    min_time = df.loc[min_idx, "DateTime"]
-    pct = (min_price - entry_price) / entry_price * 100
-    return min_price, pct, min_time, int(min_idx)
-
-
-def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
-    buf = io.StringIO()
-    df.to_csv(buf, index=False)
-    return buf.getvalue().encode()
-
-
-def fmt_ts(x, timespan: str) -> str:
-    if timespan == "day":
-        return pd.to_datetime(x).strftime("%Y-%m-%d")
-    return pd.to_datetime(x).strftime("%Y-%m-%d %H:%M")
-
-
-def pct_class(p: float) -> str:
-    return "pct-green" if p >= 0 else "pct-red"
-
-
-def kpi_card(title: str, value_line1: str, value_line2: str, pct: float):
-    return f"""
-      <div class="kpi-card">
-        <div class="kpi-title">{title}</div>
-        <div class="kpi-value">{value_line1}</div>
-        <div class="kpi-sub {pct_class(pct)}">{value_line2}</div>
-      </div>
-    """
-
 
 # =========================
 # AUTH (optional) - if you enabled APP_PASSWORD in secrets
@@ -382,6 +213,149 @@ if APP_PASSWORD:
             st.info("Enter password to continue.")
             st.stop()
 
+# =========================
+# HELPERS
+# =========================
+def build_option_symbol(ticker: str, expiry: str, strike: float, opt_type: str) -> str:
+    dt = datetime.strptime(expiry, "%Y-%m-%d")
+    return f"O:{ticker.upper()}{dt.strftime('%y%m%d')}{opt_type.upper()}{int(round(strike * 1000)):08d}"
+
+@st.cache_data(ttl=300)
+def fetch_bars(api_key: str, symbol: str, timespan: str, start: str, end: str, adjusted: bool | None = None):
+    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/{timespan}/{start}/{end}"
+    params = {"apiKey": api_key}
+    if adjusted is not None:
+        params["adjusted"] = "true" if adjusted else "false"
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json().get("results", [])
+
+def clean_option_df(raw_results, timespan: str) -> pd.DataFrame:
+    df = pd.DataFrame(raw_results)
+    if timespan == "day":
+        df["DateTime"] = pd.to_datetime(df["t"], unit="ms", utc=True).dt.date
+        df["DateTime"] = pd.to_datetime(df["DateTime"])
+    else:
+        df["DateTime"] = pd.to_datetime(df["t"], unit="ms", utc=True).dt.tz_convert(LA_TZ)
+
+    df = df.rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"})
+    keep = ["DateTime", "Open", "High", "Low", "Close", "Volume"]
+    return df[[c for c in keep if c in df.columns]].sort_values("DateTime").reset_index(drop=True)
+
+def clean_underlying_df(raw_results, timespan: str) -> pd.DataFrame:
+    df = pd.DataFrame(raw_results)
+    if timespan == "day":
+        df["DateTime"] = pd.to_datetime(df["t"], unit="ms", utc=True).dt.date
+        df["DateTime"] = pd.to_datetime(df["DateTime"])
+    else:
+        df["DateTime"] = pd.to_datetime(df["t"], unit="ms", utc=True).dt.tz_convert(LA_TZ)
+
+    df = df.rename(columns={"c": "Underlying Adj Close"})
+    return df[["DateTime", "Underlying Adj Close"]].sort_values("DateTime").reset_index(drop=True)
+
+def add_underlying_price(option_df: pd.DataFrame, underlying_df: pd.DataFrame) -> pd.DataFrame:
+    if option_df.empty:
+        return option_df
+    if underlying_df.empty:
+        out = option_df.copy()
+        out["Underlying Adj Close"] = pd.NA
+        return out
+
+    return pd.merge_asof(
+        option_df.sort_values("DateTime"),
+        underlying_df.sort_values("DateTime"),
+        on="DateTime",
+        direction="backward",
+    )
+
+def compute_rth_close_series_from_minutes(minute_df: pd.DataFrame, rth_cutoff_hhmm: str = "13:00") -> pd.DataFrame:
+    if minute_df.empty:
+        return pd.DataFrame(columns=["Date", "RTH Close"])
+    cutoff_time = pd.to_datetime(rth_cutoff_hhmm).time()
+
+    tmp = minute_df.copy()
+    if tmp["DateTime"].dt.tz is None:
+        tmp["DateTime"] = tmp["DateTime"].dt.tz_localize(LA_TZ)
+
+    tmp["LA_Date"] = tmp["DateTime"].dt.date
+    tmp["LA_Time"] = tmp["DateTime"].dt.time
+    tmp = tmp[tmp["LA_Time"] <= cutoff_time].sort_values("DateTime")
+
+    rth = tmp.groupby("LA_Date", as_index=False).tail(1)[["LA_Date", "Close"]].rename(columns={"Close": "RTH Close"})
+    rth["Date"] = pd.to_datetime(rth["LA_Date"])
+    return rth[["Date", "RTH Close"]].sort_values("Date").reset_index(drop=True)
+
+def apply_rth_close_override_to_daily(df_daily: pd.DataFrame, rth_close_by_date: pd.DataFrame) -> pd.DataFrame:
+    if df_daily.empty:
+        return df_daily
+    out = df_daily.copy().merge(rth_close_by_date, how="left", left_on="DateTime", right_on="Date")
+    if "Date" in out.columns:
+        out = out.drop(columns=["Date"])
+    out["Close (Polygon Daily)"] = out["Close"]
+    out["Close"] = out["RTH Close"].combine_first(out["Close"])
+    return out
+
+def add_pnl_and_extremes(df: pd.DataFrame, contracts: int):
+    if df.empty:
+        raise ValueError("No rows returned after filtering.")
+
+    entry_price = float(df.iloc[0]["Close"])
+    exit_price = float(df.iloc[-1]["Close"])
+
+    df["Profit%"] = (df["Close"] - entry_price) / entry_price * 100
+    df["PnL ($)"] = (df["Close"] - entry_price) * contracts * 100
+
+    peak_col = "High" if "High" in df.columns else "Close"
+    peak_idx = df.iloc[1:][peak_col].idxmax() if len(df) >= 2 else df.index[0]
+    peak_price = float(df.loc[peak_idx, peak_col])
+    peak_time = df.loc[peak_idx, "DateTime"]
+
+    entry_to_exit_pct = (exit_price - entry_price) / entry_price * 100
+    entry_to_peak_pct = (peak_price - entry_price) / entry_price * 100
+    return df, entry_price, exit_price, entry_to_exit_pct, peak_idx, peak_time, peak_price, entry_to_peak_pct, peak_col
+
+def lowest_low_before_peak(df: pd.DataFrame, entry_price: float, peak_idx: int):
+    low_col = "Low" if "Low" in df.columns else "Close"
+    if len(df) < 2:
+        return entry_price, 0.0, df.iloc[0]["DateTime"], int(df.index[0])
+
+    try:
+        peak_pos = df.index.get_loc(peak_idx)
+    except Exception:
+        peak_pos = len(df) - 1
+
+    peak_pos = max(peak_pos, 1)
+    window = df.iloc[1:peak_pos + 1].copy()
+    if window.empty:
+        return entry_price, 0.0, df.iloc[0]["DateTime"], int(df.index[0])
+
+    min_idx = window[low_col].idxmin()
+    min_price = float(df.loc[min_idx, low_col])
+    min_time = df.loc[min_idx, "DateTime"]
+    pct = (min_price - entry_price) / entry_price * 100
+    return min_price, pct, min_time, int(min_idx)
+
+def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    return buf.getvalue().encode()
+
+def fmt_ts(x, timespan: str) -> str:
+    if timespan == "day":
+        return pd.to_datetime(x).strftime("%Y-%m-%d")
+    return pd.to_datetime(x).strftime("%Y-%m-%d %H:%M")
+
+def pct_class(p: float) -> str:
+    return "pct-green" if p >= 0 else "pct-red"
+
+def kpi_card(title: str, value_line1: str, value_line2: str, pct: float):
+    return f"""
+      <div class="kpi-card">
+        <div class="kpi-title">{title}</div>
+        <div class="kpi-value">{value_line1}</div>
+        <div class="kpi-sub {pct_class(pct)}">{value_line2}</div>
+      </div>
+    """
 
 # =========================
 # TITLE
@@ -389,7 +363,7 @@ if APP_PASSWORD:
 st.title("📈 Polygon Options P&L — Option + Underlying (Adjusted)")
 
 # =========================
-# API KEY (secrets-safe, local-safe)
+# API KEY (secrets-safe)
 # =========================
 try:
     secret_key = st.secrets.get("POLYGON_API_KEY", "")
@@ -397,57 +371,72 @@ except Exception:
     secret_key = ""
 
 # =========================
-# INPUTS (sidebar + main expander)
+# INPUTS (sidebar + main expander) — prefix keys to avoid duplicates
 # =========================
-def render_inputs(container):
+def render_inputs(container, prefix: str):
     container.subheader("Contract")
 
-    ticker_ = container.text_input("Underlying Ticker", key="ticker").upper()
-    opt_type_ = container.radio("Call / Put", ["C", "P"], key="opt_type", horizontal=True)
-    strike_ = container.number_input("Strike", key="strike", step=0.5, min_value=0.0)
-    expiry_ = container.date_input("Expiration", key="expiry")
+    ticker_ = container.text_input("Underlying Ticker", value=st.session_state.ticker, key=f"{prefix}_ticker").upper()
+    opt_type_ = container.radio(
+        "Call / Put", ["C", "P"],
+        index=0 if st.session_state.opt_type == "C" else 1,
+        key=f"{prefix}_opt_type",
+        horizontal=True
+    )
+    strike_ = container.number_input(
+        "Strike", value=float(st.session_state.strike),
+        step=0.5, min_value=0.0, key=f"{prefix}_strike"
+    )
+    expiry_ = container.date_input("Expiration", value=st.session_state.expiry, key=f"{prefix}_expiry")
 
     container.subheader("Window")
-    timespan_ = container.radio("Timespan", ["minute", "day"], key="timespan", horizontal=True)
-
-    entry_date_ = container.date_input("Entry Date", key="entry_date")
-    entry_time_ = container.time_input("Entry Time (LA)", key="entry_time")
-
-    exit_date_ = container.date_input("Exit Date", key="exit_date")
-    exit_time_ = container.time_input("Exit Time (LA)", key="exit_time")
-
-    contracts_ = container.number_input("Contracts", key="contracts", step=1, min_value=1)
-
-    container.subheader("Data")
-    underlying_adjusted_ = container.checkbox("Underlying uses Adjusted prices", key="underlying_adjusted")
-    use_rth_close_for_daily_ = container.checkbox(
-        "Day mode: Use RTH Close (13:00 LA) instead of Polygon Daily Close",
-        key="use_rth_close_for_daily",
+    timespan_ = container.radio(
+        "Timespan", ["minute", "day"],
+        index=0 if st.session_state.timespan == "minute" else 1,
+        key=f"{prefix}_timespan",
+        horizontal=True
     )
 
-    # API key input only if no secret present
+    entry_date_ = container.date_input("Entry Date", value=st.session_state.entry_date, key=f"{prefix}_entry_date")
+    entry_time_ = container.time_input("Entry Time (LA)", value=st.session_state.entry_time, key=f"{prefix}_entry_time")
+
+    exit_date_ = container.date_input("Exit Date", value=st.session_state.exit_date, key=f"{prefix}_exit_date")
+    exit_time_ = container.time_input("Exit Time (LA)", value=st.session_state.exit_time, key=f"{prefix}_exit_time")
+
+    contracts_ = container.number_input("Contracts", value=int(st.session_state.contracts), step=1, min_value=1, key=f"{prefix}_contracts")
+
+    container.subheader("Data")
+    underlying_adjusted_ = container.checkbox(
+        "Underlying uses Adjusted prices", value=bool(st.session_state.underlying_adjusted), key=f"{prefix}_underlying_adjusted"
+    )
+    use_rth_close_for_daily_ = container.checkbox(
+        "Day mode: Use RTH Close (13:00 LA) instead of Polygon Daily Close",
+        value=bool(st.session_state.use_rth_close_for_daily),
+        key=f"{prefix}_use_rth_close_for_daily",
+    )
+
     api_key_ = secret_key.strip()
     if not api_key_:
-        api_key_ = container.text_input("Polygon API Key", type="password", key="manual_api_key").strip()
+        api_key_ = container.text_input("Polygon API Key", type="password", key=f"{prefix}_manual_api_key").strip()
 
-    run_ = container.button("Run", use_container_width=True)
+    run_ = container.button("Run", use_container_width=True, key=f"{prefix}_run")
+
     return (ticker_, opt_type_, strike_, expiry_,
             timespan_, entry_date_, entry_time_, exit_date_, exit_time_,
             contracts_, underlying_adjusted_, use_rth_close_for_daily_,
             api_key_, run_)
 
-# Desktop convenience: sidebar inputs
-sidebar_vals = None
+# Desktop sidebar (visible on desktop; hidden on mobile by CSS)
 st.sidebar.header("🔧 Settings")
-sidebar_vals = render_inputs(st.sidebar)
+sidebar_vals = render_inputs(st.sidebar, prefix="s")
 
-# Mobile-first: main-page Settings expander (always available)
+# Mobile-first expander
 with st.expander("⚙️ Settings", expanded=True):
-    main_vals = render_inputs(st)
+    main_vals = render_inputs(st, prefix="m")
 
-# Use whichever Run was pressed most recently
+# Prefer whichever Run was pressed
 use_vals = main_vals
-if sidebar_vals is not None and sidebar_vals[-1]:
+if sidebar_vals[-1]:
     use_vals = sidebar_vals
 elif main_vals[-1]:
     use_vals = main_vals
@@ -459,12 +448,25 @@ elif main_vals[-1]:
     API_KEY, run
 ) = use_vals
 
-# Stop until Run is pressed
+# Sync selected inputs back into session_state (so query params save the latest)
+st.session_state.ticker = ticker
+st.session_state.opt_type = opt_type
+st.session_state.strike = float(strike)
+st.session_state.expiry = expiry
+st.session_state.timespan = timespan
+st.session_state.entry_date = entry_date
+st.session_state.entry_time = entry_time
+st.session_state.exit_date = exit_date
+st.session_state.exit_time = exit_time
+st.session_state.contracts = int(contracts)
+st.session_state.underlying_adjusted = bool(underlying_adjusted)
+st.session_state.use_rth_close_for_daily = bool(use_rth_close_for_daily)
+
 if not run:
     st.info("Set your inputs above and tap **Run**.")
     st.stop()
 
-# Save inputs so next open remembers them
+# Remember last inputs
 save_inputs_to_qp()
 
 if not API_KEY:
@@ -619,14 +621,14 @@ with tab_chart:
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(df["DateTime"], df["Close"], label="Option Close", marker="o")
 
-    # Make key points visible with distinct colors
-    entry_time = df.iloc[0]["DateTime"]
-    exit_time = df.iloc[-1]["DateTime"]
+    entry_time_pt = df.iloc[0]["DateTime"]
+    exit_time_pt = df.iloc[-1]["DateTime"]
 
-    ax.scatter([entry_time], [entry_price], marker="o", s=90, color="deepskyblue", label="Entry", zorder=4)
-    ax.scatter([peak_time], [peak_price], marker="D", s=110, color="orange", label=f"Peak ({peak_col})", zorder=5)
-    ax.scatter([min_before_peak_time], [min_before_peak_price], marker="D", s=110, color="crimson", label="Before-peak low", zorder=5)
-    ax.scatter([exit_time], [exit_price], marker="s", s=90, color="violet", label="Exit", zorder=4)
+    # Distinct marker colors for visibility
+    ax.scatter([entry_time_pt], [entry_price], marker="o", s=90, color="deepskyblue", label="Entry", zorder=4)
+    ax.scatter([peak_time], [peak_price], marker="D", s=120, color="orange", label=f"Peak ({peak_col})", zorder=5)
+    ax.scatter([min_before_peak_time], [min_before_peak_price], marker="D", s=120, color="crimson", label="Before-peak low", zorder=5)
+    ax.scatter([exit_time_pt], [exit_price], marker="s", s=90, color="violet", label="Exit", zorder=4)
 
     ax.set_ylabel("Option Price ($)")
     ax.grid(alpha=0.3)
