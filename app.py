@@ -260,11 +260,12 @@ def kpi_card(title: str, value_line1: str, value_line2: str | None = None, pct: 
 # =========================
 # SIDEBAR
 # =========================
-st.sidebar.header("🔧 Settings")
+try:
+    secret_key = st.secrets.get("POLYGON_API_KEY", "")
+except Exception:
+    secret_key = ""
 
-API_KEY = st.secrets.get("POLYGON_API_KEY") or st.sidebar.text_input(
-    "Polygon API Key", type="password"
-)
+API_KEY = (secret_key or st.sidebar.text_input("Polygon API Key", type="password")).strip()
 
 
 st.sidebar.subheader("Contract")
