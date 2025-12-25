@@ -23,7 +23,7 @@ import streamlit as st
 from datetime import datetime, date, time as dtime
 from zoneinfo import ZoneInfo
 
-APP_PASSWORD = st.secrets.get("422", "")
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
 
 if APP_PASSWORD:
     if "authenticated" not in st.session_state:
@@ -37,7 +37,6 @@ if APP_PASSWORD:
         else:
             st.sidebar.warning("Enter password to continue")
             st.stop()
-
 
 LA_TZ = ZoneInfo("America/Los_Angeles")
 
