@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from datetime import datetime, date, time as dtime
 from zoneinfo import ZoneInfo
+import streamlit.components.v1 as components
 
 LA_TZ = ZoneInfo("America/Los_Angeles")
 
@@ -192,7 +193,7 @@ def save_inputs_to_qp():
 init_session_defaults_from_qp()
 
 # =========================
-# AUTH (optional) - if you enabled APP_PASSWORD in secrets
+# 🔐 APP PASSWORD (always autofocus)
 # =========================
 APP_PASSWORD = ""
 try:
@@ -205,13 +206,32 @@ if APP_PASSWORD:
         st.session_state.authenticated = False
 
     if not st.session_state.authenticated:
-        pwd = st.text_input("App Password", type="password")
+        pwd = st.text_input("App Password", type="password", key="auth_pwd")
+
+        # ALWAYS autofocus password input
+        components.html(
+            """
+            <script>
+              setTimeout(() => {
+                const doc = window.parent.document;
+                const inputs = doc.querySelectorAll('input[type="password"]');
+                if (inputs.length) {
+                  inputs[0].focus();
+                  inputs[0].select();
+                }
+              }, 80);
+            </script>
+            """,
+            height=0,
+        )
+
         if pwd == APP_PASSWORD:
             st.session_state.authenticated = True
             st.success("Unlocked")
         else:
             st.info("Enter password to continue.")
             st.stop()
+
 
 # =========================
 # HELPERS
