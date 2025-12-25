@@ -262,7 +262,10 @@ def kpi_card(title: str, value_line1: str, value_line2: str | None = None, pct: 
 # =========================
 st.sidebar.header("🔧 Settings")
 
-API_KEY = st.sidebar.text_input("Polygon API Key", type="password")
+API_KEY = st.secrets.get("POLYGON_API_KEY") or st.sidebar.text_input(
+    "Polygon API Key", type="password"
+)
+
 
 st.sidebar.subheader("Contract")
 ticker = st.sidebar.text_input("Underlying Ticker", "QQQ").upper()
