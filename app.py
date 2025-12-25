@@ -231,7 +231,11 @@ def kpi_card(title: str, value_line1: str, value_line2: str, pct: float):
 # =========================
 # AUTH (optional) - if you enabled APP_PASSWORD in secrets
 # =========================
+# =========================
+# 🔐 APP PASSWORD (optional)
+# =========================
 APP_PASSWORD = ""
+
 try:
     APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
 except Exception:
@@ -240,14 +244,17 @@ except Exception:
 if APP_PASSWORD:
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
+
     if not st.session_state.authenticated:
         pwd = st.text_input("App Password", type="password")
+
         if pwd == APP_PASSWORD:
             st.session_state.authenticated = True
             st.success("Unlocked")
         else:
             st.info("Enter password to continue.")
             st.stop()
+
 
 # =========================
 # TITLE
